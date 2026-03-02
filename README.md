@@ -1,3 +1,12 @@
+
+    
+title: Anime Intelligence Vault
+emoji: 🗄️
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false    
+    
 # Anime Intelligence Vault
 
 An end-to-end, production-grade agentic semantic search engine and intelligence 
