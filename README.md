@@ -1,11 +1,12 @@
-
-    
+---
 title: Anime Intelligence Vault
 emoji: 🗄️
 colorFrom: blue
 colorTo: indigo
 sdk: docker
-pinned: false    
+app_file: app.py
+pinned: false
+---   
     
 # Anime Intelligence Vault
 
@@ -75,5 +76,4 @@ The codebase is organized by domain and function to ensure maintainability:
 4. Run `python vault_manager.py` to initialize the empty database and begin ingesting seasonal data.
 5. Launch the frontend: `streamlit run app.py`
 
----
 *Data attribution: Objective metadata and raw community reviews are sourced from MyAnimeList.net via the open-source Jikan API.*
