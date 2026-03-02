@@ -1,0 +1,22 @@
+# Security & Environments
+env_variables.env
+.env
+venv/
+env/
+token_data.json
+
+# Databases (Protects file sizes and local telemetry)
+*.db
+*.sqlite3
+data/anime_telemetry.db
+
+# Python Caches
+__pycache__/
+*.pyc
+*.pyo
+
+# No need to include the Archive folder
+/Archive
+
+# EXCEPTION: Allow the main intelligence vault to upload to GitHub
+!data/anime_intelligence_v2.db

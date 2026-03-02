@@ -1,0 +1,12 @@
+playwright
+playwright-stealth
+pytest-playwright
+vaderSentiment
+textblob
+pandas
+matplotlib
+streamlit
+scikit-learn
+seaborn
+python-dotenv
+google-genai

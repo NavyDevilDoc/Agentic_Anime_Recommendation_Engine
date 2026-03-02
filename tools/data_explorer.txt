@@ -1,0 +1,76 @@
+-- ==========================================
+-- MISSION CONTROL: STATUS & COVERAGE
+-- ==========================================
+
+-- 1. Get a breakdown of all years and seasons currently in the vault
+SELECT season, COUNT(*) as show_count 
+FROM anime_info 
+GROUP BY season 
+ORDER BY release_year DESC, 
+    CASE 
+        WHEN season LIKE 'Winter%' THEN 1 
+        WHEN season LIKE 'Spring%' THEN 2 
+        WHEN season LIKE 'Summer%' THEN 3 
+        WHEN season LIKE 'Fall%' THEN 4 
+    END;
+
+-- 2. Count the number of shows in a specific targeted season (e.g., Fall 2025)
+SELECT COUNT(*) 
+FROM anime_info 
+WHERE season = 'Fall_2025';
+
+-- 3. Find the 'Newest' additions to the vault (sorted by ID)
+SELECT english_title, season, release_year 
+FROM anime_info 
+ORDER BY id DESC 
+LIMIT 20;
+
+ -- 4. Top n shows
+SELECT
+  english_title,
+  mal_score,
+  scored_by,
+  release_year
+FROM anime_info
+ORDER BY
+  mal_score DESC
+LIMIT n (enter a value here)
+
+-- ==========================================
+-- QUALITY ASSURANCE: FINDING THE GAPS
+-- ==========================================
+
+-- 4. Identify shows that exist but failed the AI Distillation (NULL Consensus)
+SELECT id, english_title, season 
+FROM anime_info 
+WHERE consensus_json IS NULL OR consensus_json = 'null';
+
+-- 5. Identify shows missing an official synopsis (Narrative Report)
+SELECT id, english_title 
+FROM anime_info 
+WHERE narrative_report IS NULL OR narrative_report = '';
+
+
+-- ==========================================
+-- INTELLIGENCE LOOKUPS: THE "SO WHAT?"
+-- ==========================================
+
+-- 6. Find the highest-vibe shows for a specific year (e.g., 2022)
+SELECT english_title, mal_score, avg_sentiment, studio
+FROM anime_info
+WHERE release_year = 2022
+ORDER BY avg_sentiment DESC
+LIMIT 10;
+
+-- 7. Search for shows by Studio and Vibe (e.g., Mappa or Ufotable)
+SELECT english_title, release_year, avg_sentiment, thematic_vibe
+FROM anime_info
+WHERE studio LIKE '%MAPPA%' OR studio LIKE '%Ufotable%'
+ORDER BY avg_sentiment DESC;
+
+-- 8. Find "Polarizing" shows (High MAL score but Neutral/Low Sentiment)
+-- These are often shows with huge hype that left fans feeling "meh."
+SELECT english_title, mal_score, avg_sentiment, scored_by
+FROM anime_info
+WHERE mal_score > 8.0 AND avg_sentiment BETWEEN -0.1 AND 0.3
+ORDER BY mal_score DESC;
