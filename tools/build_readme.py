@@ -10,7 +10,10 @@ ROOT_DIR = os.path.abspath(os.path.join(TOOLS_DIR, '..'))
 README_PATH = os.path.join(ROOT_DIR, "README.md")
 
 def generate_readme():
-    markdown_content = """# Anime Intelligence Vault
+    markdown_content = """
+
+    
+# Anime Intelligence Vault
 
 An end-to-end, production-grade agentic semantic search engine and intelligence 
 pipeline. This system leverages multi-step LLM reasoning to autonomously ingest, 
