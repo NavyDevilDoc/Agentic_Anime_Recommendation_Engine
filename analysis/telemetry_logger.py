@@ -1,45 +1,51 @@
 """
 MODULE: analysis/telemetry_logger.py
-FUNCTION: Silent observer for the Recommendation Engine. Logs prompts, SQL, and outcomes for offline MLOps analysis.
+FUNCTION: Silent observer for the Recommendation Engine. Logs prompts, SQL, and outcomes for offline MLOps analysis via GCP.
 """
-import sqlite3
 import os
+import streamlit as st
+from sqlalchemy import create_engine, text
 
-SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
-if os.path.basename(SCRIPT_DIR) in ['tools', 'analysis', 'src']:
-    ROOT_DIR = os.path.dirname(SCRIPT_DIR)
-else:
-    ROOT_DIR = SCRIPT_DIR
-
-TELEMETRY_DB = os.path.join(ROOT_DIR, "data", "anime_telemetry.db")
-
-def _init_telemetry_db():
-    # Ensure the data directory exists
-    os.makedirs(os.path.dirname(TELEMETRY_DB), exist_ok=True)
-    
-    with sqlite3.connect(TELEMETRY_DB) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS engine_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                user_prompt TEXT,
-                lens_used TEXT,
-                generated_sql TEXT,
-                candidate_count INTEGER,
-                success BOOLEAN,
-                error_message TEXT,
-                recommended_titles TEXT,
-                user_rating INTEGER DEFAULT NULL
-            )
-        """)
+# Smart Credential Routing: Checks Streamlit Secrets first (for HF), then local env vars
+def get_db_uri():
+    try:
+        return st.secrets["GCP_POSTGRES_URI"]
+    except Exception:
+        return os.environ.get("GCP_POSTGRES_URI")
 
 def log_engine_execution(prompt, lens, sql, candidate_count, success, error_msg="", recommendations=""):
-    _init_telemetry_db()
+    """
+    Transmits an execution payload directly to the GCP PostgreSQL Single Source of Truth.
+    """
+    uri = get_db_uri()
+    
+    if not uri:
+        print("⚠️ Telemetry Warning: GCP_POSTGRES_URI not found. Log aborted.")
+        return
+
     try:
-        with sqlite3.connect(TELEMETRY_DB) as conn:
-            conn.execute("""
-                INSERT INTO engine_logs (user_prompt, lens_used, generated_sql, candidate_count, success, error_message, recommended_titles)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (prompt, lens, sql, candidate_count, success, error_msg, recommendations))
+        # Create the connection engine
+        engine = create_engine(uri)
+        
+        # engine.begin() automatically commits the transaction if successful
+        with engine.begin() as conn:
+            # Using SQLAlchemy's text() for safe, parameterized SQL injection
+            query = text("""
+                INSERT INTO telemetry_logs (user_prompt, lens_used, generated_sql, candidate_count, success, error_message, recommended_titles)
+                VALUES (:prompt, :lens, :sql, :candidate_count, :success, :error_msg, :recommendations)
+            """)
+            
+            conn.execute(query, {
+                "prompt": prompt,
+                "lens": lens,
+                "sql": sql,
+                "candidate_count": candidate_count,
+                "success": success,
+                "error_msg": error_msg,
+                "recommendations": recommendations
+            })
+            
+        print("📡 Telemetry successfully beamed to GCP Cloud.")
+        
     except Exception as e:
         print(f"⚠️ Telemetry Logging Failed: {e}")

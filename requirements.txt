@@ -10,3 +10,5 @@ scikit-learn
 seaborn
 python-dotenv
 google-genai
+sqlalchemy
+psycopg2-binary

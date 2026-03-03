@@ -16,6 +16,7 @@ if SCRIPT_DIR not in sys.path:
 
 import analysis.queries as queries
 from analysis.recommendation_engine import RecommendationEngine
+from analysis.telemetry_logger import log_engine_execution
 
 load_dotenv(os.path.join(SCRIPT_DIR, "env_variables.env"))
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -212,8 +213,33 @@ with tab_triangulate:
         with st.spinner(f"Extracting shared DNA from {len(active_targets)} target(s) and cross-referencing vault..."):
             result = engine.execute_dna_triangulation(active_targets)
             
+            # --- TELEMETRY HOOK ---
+            target_str = ", ".join(active_targets)
+            if result.get("success"):
+                rec_list = ", ".join([item["profile"]["title"] for item in result["data"]])
+                sql_used = result.get("diagnostics", {}).get("sql_used", "N/A")
+                log_engine_execution(
+                    prompt=f"DNA Targets: {target_str}",
+                    lens="DNA Triangulation",
+                    sql=sql_used,
+                    candidate_count=len(result["data"]),
+                    success=True,
+                    recommendations=rec_list
+                )
+            else:
+                log_engine_execution(
+                    prompt=f"DNA Targets: {target_str}",
+                    lens="DNA Triangulation",
+                    sql="",
+                    candidate_count=0,
+                    success=False,
+                    error_msg=result.get("error", "Unknown Error")
+                )
+            # ----------------------
+            
             if not result.get("success"):
                 st.error(f"**Lookup Failed:** {result.get('error')}")
+            # ... (the rest of your rendering logic stays exactly the same)
             else:
                 st.markdown(f'<div class="dna-box"><b>🧬 DNA Synthesis Complete:</b><br>{result["intersection_summary"]}</div>', unsafe_allow_html=True)
                 
