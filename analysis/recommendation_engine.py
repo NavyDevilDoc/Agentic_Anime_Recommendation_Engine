@@ -119,11 +119,11 @@ class RecommendationEngine:
             return []
 
     # =====================================================================
-    # NEW STATEFUL ARCHITECTURE
+    # NEW STATEFUL ARCHITECTURE (AOT GLOBAL SCORING)
     # =====================================================================
 
     def fetch_vault_pool(self, user_prompt, lens_name="Baseline"):
-        """STEP 1: Generates SQL, queries Vault, and prepares the master data pool."""
+        """STEP 1: Generates SQL, queries Vault, and PRE-SCORES all top candidates."""
         sql_query = self._generate_sql(user_prompt, lens_name)
         if sql_query == "RATE_LIMIT_ERROR":
             return {"success": False, "error": "System cooling down. API rate limits are currently at maximum capacity. Please try again in 60 seconds."}
@@ -136,72 +136,67 @@ class RecommendationEngine:
 
         fusion_profiles = queries.fetch_fusion_profiles(candidate_titles)
 
-        # STATEFUL PREP: Shuffle for Vibe searches, maintain strict descending order for Objective.
         if lens_name == "Objective Rankings":
-            # HARD OVERRIDE: Sort descending by quality score, ignoring whatever order the SQL returned
             pool = sorted(fusion_profiles, key=lambda x: x.get('quality_score', 0.0), reverse=True)
-        else:
-            pool = fusion_profiles[:30] 
-            #random.shuffle(pool)        
-
-        return {
-            "success": True, 
-            "pool": pool, 
-            "sql_used": sql_query
-        }
-
-    def process_next_chunk(self, user_prompt, chunk, lens_name="Baseline", sql_query=""):
-        """
-        STEP 2: Takes a chunk (e.g., 5 shows) from the cached pool, 
-        bypasses or runs the LLM reranker, and packages it for the UI.
-        """
-        if not chunk:
-            return {"success": False, "error": "No more shows left in the pool."}
-
-        if lens_name == "Objective Rankings":
-            # DIRECT BYPASS: No AI reasoning needed. Raw deterministic data formatting.
-            final_results = []
-            for idx, p in enumerate(chunk):
-                final_results.append({
+            # Create dummy pre-scored objects so the UI still works seamlessly
+            scored_pool = []
+            for idx, p in enumerate(pool[:30]):
+                scored_pool.append({
                     "ai_reasoning": f"Objective Result #{idx + 1} from direct Vault query.",
-                    "match_confidence": 100, # Factually matches the SQL parameters
+                    "match_confidence": 100, 
                     "controversy_warning": None,
                     "profile": p
                 })
         else:
-            # VIBE MODE: Run the Reranker on this specific chunk
-            top_picks = self._rerank_candidates(user_prompt, chunk)
+            # VIBE MODE: Take the top 15 from SQL and score them ALL at once
+            pool = fusion_profiles[:15] 
+            top_picks = self._rerank_candidates(user_prompt, pool)
+            
             if top_picks == ["RATE_LIMIT_ERROR"]:
                  return {"success": False, "error": "System cooling down. API rate limits are currently at maximum capacity. Please try again in 60 seconds."}
             
-            # HARD OVERRIDE: Force Python to sort the LLM's output by match_confidence DESC
+            # GLOBAL SORT: Rank all 15 shows by AI confidence before pagination
             top_picks = sorted(top_picks, key=lambda x: x.match_confidence, reverse=True)
             
-            final_results = []
+            scored_pool = []
             for pick in top_picks:
-                profile_data = next((p for p in chunk if p['title'] == pick.title), None)
+                profile_data = next((p for p in pool if p['title'] == pick.title), None)
                 if profile_data:
-                    final_results.append({
+                    scored_pool.append({
                         "ai_reasoning": pick.reasoning,
                         "match_confidence": pick.match_confidence,
                         "controversy_warning": pick.controversy_driver,
                         "profile": profile_data
                     })
 
-        # LOGGING
-        if final_results:
-            rec_titles = ", ".join([item['profile']['title'] for item in final_results])
-            telemetry.log_engine_execution(
-                prompt=user_prompt, 
-                lens=lens_name, 
-                sql=sql_query, 
-                candidate_count=len(chunk), 
-                success=True,
-                error_msg="",
-                recommendations=rec_titles
-            )
+            # LOGGING: Record the execution now that the global pool is built
+            if scored_pool:
+                rec_titles = ", ".join([item['profile']['title'] for item in scored_pool[:5]])
+                telemetry.log_engine_execution(
+                    prompt=user_prompt, 
+                    lens=lens_name, 
+                    sql=sql_query, 
+                    candidate_count=len(pool), 
+                    success=True,
+                    error_msg="",
+                    recommendations=rec_titles
+                )
 
-        return {"success": True, "data": final_results, "diagnostics": {"sql_used": sql_query}}
+        return {
+            "success": True, 
+            "pool": scored_pool, # Returning a fully scored and sorted vault!
+            "sql_used": sql_query
+        }
+
+    def process_next_chunk(self, user_prompt, chunk, lens_name="Baseline", sql_query=""):
+        """
+        STEP 2: The chunk is now ALREADY SCORED. Just return it to the UI instantly.
+        """
+        if not chunk:
+            return {"success": False, "error": "No more shows left in the pool."}
+
+        # Bypassing the LLM entirely. We just hand the pre-scored dictionary directly to Streamlit!
+        return {"success": True, "data": chunk, "diagnostics": {"sql_used": sql_query}}
 
     # =====================================================================
     # LEGACY WRAPPERS & TRIANGULATION
