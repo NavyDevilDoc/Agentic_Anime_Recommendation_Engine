@@ -142,7 +142,7 @@ class RecommendationEngine:
             pool = sorted(fusion_profiles, key=lambda x: x.get('quality_score', 0.0), reverse=True)
         else:
             pool = fusion_profiles[:30] 
-            random.shuffle(pool)        
+            #random.shuffle(pool)        
 
         return {
             "success": True, 
@@ -173,6 +173,9 @@ class RecommendationEngine:
             top_picks = self._rerank_candidates(user_prompt, chunk)
             if top_picks == ["RATE_LIMIT_ERROR"]:
                  return {"success": False, "error": "System cooling down. API rate limits are currently at maximum capacity. Please try again in 60 seconds."}
+            
+            # HARD OVERRIDE: Force Python to sort the LLM's output by match_confidence DESC
+            top_picks = sorted(top_picks, key=lambda x: x.match_confidence, reverse=True)
             
             final_results = []
             for pick in top_picks:

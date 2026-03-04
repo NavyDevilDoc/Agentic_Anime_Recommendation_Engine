@@ -25,8 +25,7 @@ Execution Constraints:
 3. Always include a LIMIT 50 clause.
 4. For thematic searches, use LIKE with wildcards on 'consensus_json' and 'mal_synopsis' (e.g., consensus_json LIKE '%dark%').
 5. Escape single quotes in search strings (e.g., 'Protagonist''s').
-6. ELASTIC SEARCHING: When searching for themes, use OR to include synonyms (e.g., for 'gritty', search '%gritty%' OR '%dark%' OR '%mature%'). Do not rigidly require every user keyword to be present.
-"""
+6. ANCHORED ELASTICITY: Identify the CORE subject (e.g., 'sports' in "action packed sports"). The core subject MUST be an 'AND' condition. Use 'OR' only for secondary vibe modifiers (e.g., 'action', 'fast'). If you use 'OR' for the core subject, the query will fail by returning unrelated genres."""
 
 # --- THE TARGETING LENSES (SQL GENERATORS) ---
 
@@ -88,9 +87,10 @@ CANDIDATE INTELLIGENCE PROFILES:
 
 Task:
 1. Cross-reference the objective plot (Synopsis) with the subjective audience reaction (Consensus/Sentiment).
-2. Select the Top 3 shows that BEST satisfy the user's request based on this fused data.
-3. Write a 1-sentence 'reasoning' explaining exactly why the plot and audience consensus make this a perfect fit.
-4. If the Controversy Score is 6 or higher, provide a 'controversy_driver' warning the user of potential friction.
+2. RUTHLESS ELIMINATION: You must discard any candidate that completely misses the core intent of the user's prompt (e.g., recommending a fantasy battle anime for a 'sports' prompt).
+3. Select up to the Top 5 shows that BEST satisfy the user's request from the remaining valid candidates. If only 2 truly match, only return 2.
+4. Write a 1-sentence 'reasoning' explaining exactly why the plot and audience consensus make this a perfect fit. Do NOT select a show just to complain that it doesn't fit the prompt.
+5. If the Controversy Score is 6 or higher, provide a 'controversy_driver' warning the user of potential friction.
 
 Output MUST conform to the requested JSON schema.
 """
