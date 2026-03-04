@@ -1,3 +1,12 @@
+---
+license: apache-2.0
+title: Anime_Recommendation_engine
+sdk: docker
+emoji: 📊
+colorFrom: blue
+colorTo: indigo
+short_description: agentic anime intelligence app
+---
     
 # Anime Intelligence Vault
 
@@ -76,6 +85,3 @@ The codebase is organized by domain and function to ensure maintainability:
 3. Create an `env_variables.env` file in the root directory and add your Google AI Studio API key: `GOOGLE_API_KEY="your_key_here"`
 4. Run `python vault_manager.py` to initialize the empty database and begin ingesting seasonal data.
 5. Launch the frontend: `streamlit run app.py`
-
----
-*Data attribution: Objective metadata and raw community reviews are sourced from MyAnimeList.net via the open-source Jikan API.*
