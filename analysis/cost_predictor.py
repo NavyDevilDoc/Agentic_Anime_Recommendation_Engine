@@ -1,24 +1,26 @@
 """
 MODULE: analysis/cost_predictor.py
-FUNCTION: MLOps telemetry tool to calculate daily burn rate and forecast 30-day API sustainment costs.
+FUNCTION: MLOps telemetry tool to calculate daily burn rate and forecast 30-day API sustainment costs via GCP.
 """
-import sqlite3
-import pandas as pd
 import os
+import pandas as pd
+from sqlalchemy import create_engine
+from dotenv import load_dotenv
 
-# --- PATH ANCHORING ---
-SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
-if os.path.basename(SCRIPT_DIR) in ['tools', 'analysis', 'src']:
-    ROOT_DIR = os.path.dirname(SCRIPT_DIR)
-else:
-    ROOT_DIR = SCRIPT_DIR
-
-TELEMETRY_DB = os.path.join(ROOT_DIR, "data", "anime_telemetry.db")
+# Load the local environment variables so the CLI can find the GCP URI
+load_dotenv('env_variables.env')
 
 # --- PRICING HEURISTICS (Gemini 2.5 Flash) ---
 # Rates per 1,000,000 tokens
 COST_PER_1M_INPUT = 0.30
 COST_PER_1M_OUTPUT = 2.50
+
+def get_db_uri():
+    """
+    Smart routing to grab the URI whether running locally via CLI or inside Streamlit.
+    Pulls the URI securely from the environment.
+    """
+    return os.environ.get("GCP_POSTGRES_URI")
 
 def estimate_tokens(row):
     """
@@ -39,12 +41,21 @@ def estimate_tokens(row):
     return pd.Series({'input_tokens': in_chars / 4, 'output_tokens': out_chars / 4})
 
 def run_cost_analysis():
-    if not os.path.exists(TELEMETRY_DB):
-        print("❌ Telemetry database not found. Run the app to generate logs first.")
+    uri = get_db_uri()
+    
+    if not uri:
+        print("❌ Telemetry Warning: GCP_POSTGRES_URI not found. Log aborted.")
         return
 
-    with sqlite3.connect(TELEMETRY_DB) as conn:
-        df = pd.read_sql_query("SELECT timestamp, user_prompt, generated_sql, recommended_titles, success FROM engine_logs", conn)
+    print("🔗 Connecting to Google Cloud PostgreSQL...")
+    try:
+        engine = create_engine(uri)
+        # Replaced 'engine_logs' with 'telemetry_logs' to match the new cloud architecture
+        query = "SELECT timestamp, user_prompt, generated_sql, recommended_titles, success FROM telemetry_logs"
+        df = pd.read_sql_query(query, engine)
+    except Exception as e:
+        print(f"❌ Failed to retrieve telemetry from cloud: {e}")
+        return
 
     if df.empty:
         print("⚠️ No telemetry data available yet to calculate burn rate.")
@@ -74,7 +85,7 @@ def run_cost_analysis():
     projected_30_day_cost = avg_daily_cost * 30
 
     print("\n==================================================")
-    print(" 📊 MLOPS TELEMETRY & COST FORECAST")
+    print(" 📊 MLOPS TELEMETRY & COST FORECAST (GCP CLOUD)")
     print("==================================================")
     print(f"Total Queries Logged:  {len(df)}")
     print(f"Total API Spend (Est): ${df['total_cost'].sum():.4f}\n")
