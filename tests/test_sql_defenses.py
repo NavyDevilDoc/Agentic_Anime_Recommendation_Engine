@@ -10,7 +10,7 @@ import sqlite3
 
 # --- BULLETPROOF PATH ANCHORING ---
 SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
-if os.path.basename(SCRIPT_DIR) in ['tools', 'analysis', 'src']:
+if os.path.basename(SCRIPT_DIR) in ['tools', 'analysis', 'src', 'tests']:
     ROOT_DIR = os.path.dirname(SCRIPT_DIR)
 else:
     ROOT_DIR = SCRIPT_DIR
@@ -18,7 +18,7 @@ else:
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-import analysis.queries as queries
+import analysis.queries_deprecated as queries
 
 DB_PATH = os.path.join(ROOT_DIR, "data", "anime_intelligence_v2.db")
 

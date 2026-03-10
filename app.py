@@ -30,8 +30,6 @@ if "current_index" not in st.session_state:
     st.session_state.current_index = 0
 if "current_results" not in st.session_state:
     st.session_state.current_results = []
-if "sql_used" not in st.session_state:
-    st.session_state.sql_used = ""
 if "last_query" not in st.session_state:
     st.session_state.last_query = ""
 if "last_lens" not in st.session_state:
@@ -55,7 +53,7 @@ engine = get_engine()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_fetch_pool(query, lens):
-    """Caches the heavy SQL generation and DB retrieval for 1 hour."""
+    """Caches the FAISS vector retrieval and reranking for 1 hour."""
     return engine.fetch_vault_pool(query, lens)
 
 # --- SIDEBAR ---
@@ -93,18 +91,12 @@ with tab_search:
     st.write("Scan the encyclopedia for specific themes, tones, or objective rankings.")
     
     lens_info = {
-        "Standard Match": "Finds the best overall thematic and narrative fit.",
-        "Hidden Gems": "Prioritizes highly-rated shows with smaller audiences.",
-        "Crowd Pleasers": "Explicitly avoids highly controversial or divisive elements.",
-        "Polarizing/Edgy": "High Risk / High Reward. Recommends polarizing, 'love-it-or-hate-it' shows.",
-        "Objective Rankings": "Bypasses AI reasoning to return hard database rankings (e.g., 'Top 10 of Winter 2024')."
+        "Intelligent Search": "AI-powered semantic search. Understands vibes, themes, and implicit preferences like 'hidden gems' or 'crowd pleasers'.",
+        "Objective Rankings": "Bypasses AI reasoning to return hard database rankings. Supports genre + season filters (e.g., 'Top sports anime from Fall 2019')."
     }
 
     backend_lens_map = {
-        "Standard Match": "Baseline",
-        "Hidden Gems": "Deep Scan",
-        "Crowd Pleasers": "Friction Filter",
-        "Polarizing/Edgy": "Vanguard",
+        "Intelligent Search": "Intelligent Search",
         "Objective Rankings": "Objective Rankings"
     }
     
@@ -131,14 +123,13 @@ with tab_search:
             else:
                 # Save the pool and metadata to Session State
                 st.session_state.active_pool = pool_response["pool"]
-                st.session_state.sql_used = pool_response["sql_used"]
                 st.session_state.current_index = 0
                 st.session_state.last_query = user_query
                 st.session_state.last_lens = engine_lens_name
                 
                 # Slice the first 5 and process them
                 chunk = st.session_state.active_pool[0:5]
-                chunk_response = engine.process_next_chunk(user_query, chunk, engine_lens_name, st.session_state.sql_used)
+                chunk_response = engine.process_next_chunk(user_query, chunk, engine_lens_name)
                 
                 if chunk_response.get("success"):
                     st.session_state.current_results = chunk_response["data"]
@@ -170,25 +161,49 @@ with tab_search:
                 
                 st.link_button("🌐 View on MyAnimeList", f"https://myanimelist.net/anime/{profile.get('id', '')}")
 
-        # 3. PAGINATION BUTTON
-        if len(st.session_state.active_pool) > st.session_state.current_index + 5:
-            if st.button("🔄 Show Me 5 More", use_container_width=True):
-                st.session_state.current_index += 5
-                start = st.session_state.current_index
-                chunk = st.session_state.active_pool[start : start + 5]
-                
-                with st.spinner("Processing next batch..."):
-                    chunk_response = engine.process_next_chunk(
-                        st.session_state.last_query, 
-                        chunk, 
-                        st.session_state.last_lens, 
-                        st.session_state.sql_used
-                    )
-                    if chunk_response.get("success"):
-                        st.session_state.current_results = chunk_response["data"]
-                        st.rerun()
-                    else:
-                        st.error("Failed to process the next batch.")
+        # 3. PAGINATION BUTTONS (Back + Next)
+        has_next = len(st.session_state.active_pool) > st.session_state.current_index + 5
+        has_prev = st.session_state.current_index > 0
+
+        if has_prev or has_next:
+            nav_cols = st.columns([1, 1] if (has_prev and has_next) else [1])
+            col_idx = 0
+
+            if has_prev:
+                with nav_cols[col_idx]:
+                    if st.button("⬅️ Previous", use_container_width=True):
+                        st.session_state.current_index -= 5
+                        start = st.session_state.current_index
+                        chunk = st.session_state.active_pool[start : start + 5]
+
+                        chunk_response = engine.process_next_chunk(
+                            st.session_state.last_query,
+                            chunk,
+                            st.session_state.last_lens
+                        )
+                        if chunk_response.get("success"):
+                            st.session_state.current_results = chunk_response["data"]
+                            st.rerun()
+                col_idx += 1
+
+            if has_next:
+                with nav_cols[col_idx]:
+                    if st.button("🔄 Show Me More", use_container_width=True):
+                        st.session_state.current_index += 5
+                        start = st.session_state.current_index
+                        chunk = st.session_state.active_pool[start : start + 5]
+
+                        with st.spinner("Processing next batch..."):
+                            chunk_response = engine.process_next_chunk(
+                                st.session_state.last_query,
+                                chunk,
+                                st.session_state.last_lens
+                            )
+                            if chunk_response.get("success"):
+                                st.session_state.current_results = chunk_response["data"]
+                                st.rerun()
+                            else:
+                                st.error("Failed to process the next batch.")
 
 # ==========================================
 # TAB 2: DNA TRIANGULATION

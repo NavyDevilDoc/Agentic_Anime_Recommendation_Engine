@@ -44,14 +44,19 @@ class ReviewDistiller:
         prompt = f"""
         Act as a Media Intelligence Analyst. Analyze the audience corpus for: {title}.
         Focus on identifying the 'Emotional Signature' and 'Narrative Quality'.
-        
+
         CORPUS:
         {corpus}
 
         TASK:
-        1. thematic_vibe: Extract 3 specific tags (e.g., 'Grimdark', 'Philosophical').
+        1. thematic_vibe: Extract exactly 3 comma-separated genre/mood tags (e.g., 'Grimdark, Philosophical, Coming-of-Age'). Use standard genre vocabulary when possible (Action, Romance, Mecha, Isekai, Slice of Life, Psychological, Horror, Comedy, Drama, Sports, Fantasy, Sci-Fi, Mystery, Thriller, Supernatural).
         2. pros/cons: Identify high-signal critiques about production and writing.
-        3. controversy_score: Scale 1-10 (how polarized is the audience?).
+        3. controversy_score: Scale 1-10 calibrated as follows:
+           - 1-2: Near-universal agreement (e.g., widely beloved classics or universally panned shows)
+           - 3-4: Mild disagreement on secondary aspects (e.g., pacing complaints in an otherwise praised show)
+           - 5-6: Genuine split opinions on core elements (e.g., divisive ending, love-it-or-hate-it art style)
+           - 7-8: Strong polarization where fans and detractors are both vocal (e.g., controversial plot twists, tone shifts)
+           - 9-10: Culture-war level divide where the show itself is a litmus test (e.g., Redo of Healer, School Days)
         4. consensus_summary: A 2-4 sentence executive summary of the audience mood.
         """
 

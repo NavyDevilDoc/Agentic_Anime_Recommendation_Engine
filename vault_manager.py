@@ -26,7 +26,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from src.seasonal_ingestor_v2 import SeasonalIngestor
-import analysis.queries as queries # [ADDED] To resolve human-typed titles to DB records
+from analysis.vector_store import update_index
 
 # --- CONFIG ---
 DB_PATH = os.path.join(ROOT_DIR, "data", "anime_intelligence_v2.db")
@@ -113,10 +113,28 @@ def run_seasonal_audit(year, season_name):
                 # Check for low-density/failed distillation
                 if not data.get('pros') or len(data.get('pros')) == 0:
                     pass
-            except:
+            except (json.JSONDecodeError, TypeError, KeyError):
                 failed_ids.append(mal_id)
                 
     return failed_ids
+
+def sync_faiss_index(mal_ids):
+    """
+    Updates the FAISS vector index for the given MAL IDs.
+    Called after ingestion to ensure newly vaulted shows are searchable.
+    """
+    if not mal_ids:
+        print("📭 No IDs to sync to FAISS index.")
+        return
+
+    print(f"\n🔄 FAISS SYNC: Updating index for {len(mal_ids)} shows...")
+    try:
+        count = update_index(mal_ids)
+        print(f"✅ FAISS SYNC COMPLETE: {count} vectors updated.")
+    except Exception as e:
+        print(f"⚠️  FAISS SYNC FAILED: {e}")
+        print("   The FAISS index may be stale. Run build_index() to fully rebuild.")
+
 
 async def execute_self_healing_campaign(targets):
     """
@@ -127,50 +145,62 @@ async def execute_self_healing_campaign(targets):
     ingestor_mod.DEFAULT_DB_PATH = DB_PATH
     ingestor = SeasonalIngestor(db_path=DB_PATH)
 
+    ingested_ids = []
+
     for t in targets:
         attempt = 1
-        max_attempts = 5  
+        max_attempts = 5
         last_gap_count = float('inf')
-        
+
         while attempt <= max_attempts:
             print(f"\n📡 MISSION: {t['season'].upper()} {t['year']} (Attempt {attempt})")
-            
+
             # 1. INGEST: Attempt to fill the vault
             await ingestor.ingest_season(t['year'], t['season'], target_ids=gaps if attempt > 1 else None)
-            
+
             # 2. AUDIT: Immediately verify the results
             gaps = run_seasonal_audit(t['year'], t['season'])
-            
+
             # SUCCESS CASE: All shows validated
             if not gaps:
+                season_tag = f"{t['season'].capitalize()}_{t['year']}"
                 with sqlite3.connect(DB_PATH) as conn:
-                    count = conn.execute("SELECT COUNT(*) FROM anime_info WHERE season = ?", (f"{t['season'].capitalize()}_{t['year']}",)).fetchone()[0]
-                
+                    rows = conn.execute("SELECT id FROM anime_info WHERE season = ? AND consensus_json IS NOT NULL", (season_tag,)).fetchall()
+                    count = len(rows)
+
                 if count > 0:
+                    ingested_ids.extend(row[0] for row in rows)
                     print(f"✅ VERIFIED: {t['season'].upper()} {t['year']} is 100% complete.")
                     break
                 else:
-                    # [MODIFIED] Break the loop instead of setting gaps = None to prevent runaway API calls on empty seasons
                     print(f"⏩ SEASON SKIPPED: No records found for {t['season'].upper()} {t['year']}. (Likely too early for community reviews). Moving to next target.")
-                    break 
-            
+                    break
+
             # PROGRESS CHECK: Detecting if the API is ignoring us
             current_gap_count = len(gaps) if gaps is not None else 0
-            
+
             if current_gap_count == last_gap_count and gaps is not None:
                 print(f"⚠️  STAGNATION: No new intelligence distilled in Attempt {attempt}.")
             last_gap_count = current_gap_count
 
             # FAILURE CASE: Exhausted retry budget
             if attempt == max_attempts:
+                # Still collect whatever was successfully ingested
+                season_tag = f"{t['season'].capitalize()}_{t['year']}"
+                with sqlite3.connect(DB_PATH) as conn:
+                    rows = conn.execute("SELECT id FROM anime_info WHERE season = ? AND consensus_json IS NOT NULL", (season_tag,)).fetchall()
+                    ingested_ids.extend(row[0] for row in rows)
                 print(f"🛑 MISSION ABORTED: {current_gap_count if gaps is not None else 'All'} shows persistently failing after {max_attempts} tries.")
                 break
 
             # HEALING PHASE: Exponential backoff to clear rate limits
-            wait_time = 15 * attempt 
+            wait_time = 15 * attempt
             print(f"⚠️  GAP DETECTED: {current_gap_count} shows failed validation. Retrying in {wait_time}s...")
             await asyncio.sleep(wait_time)
             attempt += 1
+
+    # FAISS INDEX SYNC: Update vector embeddings for all ingested shows
+    sync_faiss_index(ingested_ids)
 
     print(f"\n🏁 ALL CAMPAIGNS COMPLETE: Intelligence asset verified at {DB_PATH}")
 
@@ -188,11 +218,13 @@ async def _force_update_targets(target_dict):
     ingestor_mod.DEFAULT_DB_PATH = DB_PATH
     ingestor = SeasonalIngestor(db_path=DB_PATH)
 
+    all_target_ids = []
+
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         for season_tag, ids in target_dict.items():
             if not ids: continue
-            
+
             # Trick the ingestor into reprocessing by deleting the old intelligence payload
             placeholders = ','.join(['?'] * len(ids))
             cursor.execute(f"UPDATE anime_info SET consensus_json = NULL WHERE id IN ({placeholders})", ids)
@@ -208,9 +240,12 @@ async def _force_update_targets(target_dict):
 
             print(f"\n🎯 EXECUTING TARGETED STRIKE: {season_tag.upper()} ({len(ids)} targets)")
             await asyncio.sleep(3)
-            # Pass the specific IDs to the ingestor, which will fetch fresh Jikan data and hit Gemini
             await ingestor.ingest_season(s_year, s_name.lower(), target_ids=ids)
-            
+            all_target_ids.extend(ids)
+
+    # FAISS INDEX SYNC: Update vector embeddings for all re-processed shows
+    sync_faiss_index(all_target_ids)
+
     print("\n🏁 TARGETED UPDATES COMPLETE.")
 
 async def update_specific_targets(titles_list):
@@ -221,45 +256,51 @@ async def update_specific_targets(titles_list):
     Leaves the seasonal bulk ingestion logic completely untouched.
     """
     print(f"\n🔍 Resolving {len(titles_list)} specific targets via Live API...")
-    
+
     import src.seasonal_ingestor_v2 as ingestor_mod
     ingestor_mod.DEFAULT_DB_PATH = DB_PATH
     ingestor = SeasonalIngestor(db_path=DB_PATH)
 
+    ingested_ids = []
+
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        
+
         for t in titles_list:
             print(f"\n 🌐 Pinging Jikan API for definitive ID: '{t}'...")
             try:
                 time.sleep(1.5) # Strict pacing for Jikan Rate Limits
-                
+
                 search_url = f"https://api.jikan.moe/v4/anime?q={t}&type=tv&limit=1"
                 response = requests.get(search_url)
-                
+
                 if response.status_code == 200:
                     data = response.json().get('data', [])
                     if data:
                         show_data = data[0]
                         mal_id = show_data.get('mal_id')
                         title_en = show_data.get('title_english') or show_data.get('title')
-                        
+
                         print(f" ✨ Target Acquired: {title_en} (ID: {mal_id})")
-                        
+
                         # Set consensus to NULL to authorize the overwrite
                         cursor.execute("UPDATE anime_info SET consensus_json = NULL WHERE id = ?", (mal_id,))
                         conn.commit()
-                        
+
                         # Fire the Sniper Mode safely
                         await ingestor.ingest_single_anime(mal_id)
-                        
+                        ingested_ids.append(mal_id)
+
                     else:
                         print(f" ❌ Target Ghosted: Jikan API found zero TV results for '{t}'.")
                 else:
                     print(f" ❌ API Error: Jikan returned status {response.status_code} for '{t}'.")
             except Exception as e:
                 print(f" ❌ Network Error during live search for '{t}': {e}")
-                
+
+    # FAISS INDEX SYNC: Update vector embeddings for targeted shows
+    sync_faiss_index(ingested_ids)
+
     print("\n🏁 TARGETED UPDATES COMPLETE.")
 
 async def update_recent_releases(years_back=2):
@@ -312,5 +353,3 @@ if __name__ == "__main__":
     # MODE 3: Rolling Window Update (Last 2 Years)
     asyncio.run(update_recent_releases(years_back=2))
     """
-    
-    print("⚠️  No operation selected. Uncomment a MODE in the __main__ block to run.")

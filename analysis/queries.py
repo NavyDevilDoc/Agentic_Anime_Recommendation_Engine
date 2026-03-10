@@ -1,7 +1,8 @@
 """
 MODULE: analysis/queries.py
-FUNCTION: Database interface for the Recommendation Engine. 
-          Handles Read-Only SQL execution, Semantic Fusion packaging, and Human Fault Tolerance.
+FUNCTION: Database interface for the Recommendation Engine.
+          Handles Read-Only connections, Semantic Fusion packaging, and Human Fault Tolerance.
+          SQL execution (execute_lens_query) has been deprecated to queries_deprecated.py.
 """
 import sqlite3
 import os
@@ -22,13 +23,13 @@ else:
 DB_PATH = os.path.join(ROOT_DIR, "data", "anime_intelligence_v2.db")
 
 def _get_readonly_connection():
-    """Forces SQLite into Read-Only mode to prevent LLM SQL Injection."""
+    """Forces SQLite into Read-Only mode."""
     if not os.path.exists(DB_PATH):
         raise FileNotFoundError(f"Vault missing at {DB_PATH}")
     uri_path = f"file:{DB_PATH}?mode=ro"
     return sqlite3.connect(uri_path, uri=True)
 
-# --- TIER 1: HUMAN FAULT TOLERANCE ---
+# --- HUMAN FAULT TOLERANCE ---
 
 def resolve_show_title(user_input):
     """
@@ -47,12 +48,12 @@ def resolve_show_title(user_input):
         cursor.execute("SELECT english_title FROM anime_info WHERE english_title COLLATE NOCASE = ? OR romaji_title COLLATE NOCASE = ?", (user_input, user_input))
         rows = cursor.fetchall()
         if rows:
-            return list(dict.fromkeys([r[0] for r in rows])) # Deduplicate and return
+            return list(dict.fromkeys([r[0] for r in rows]))
 
         # TIER 2: The Punctuation Agnostic / Substring Match (Franchise Collision catcher)
         clean_input = re.sub(r'[^\w\s]', '', user_input)
         wildcard_query = "%" + "%".join(clean_input.split()) + "%"
-        
+
         cursor.execute("SELECT english_title FROM anime_info WHERE english_title LIKE ? OR romaji_title LIKE ? LIMIT 10", (wildcard_query, wildcard_query))
         rows = cursor.fetchall()
         if rows:
@@ -61,12 +62,11 @@ def resolve_show_title(user_input):
         # TIER 3: The Typo-Resistant Fuzzy Match (difflib)
         cursor.execute("SELECT english_title, romaji_title FROM anime_info")
         all_titles = cursor.fetchall()
-        
+
         flat_titles = [t for pair in all_titles for t in pair if t]
-        
-        # Increase n=5 to return up to 5 fuzzy matches
+
         matches = difflib.get_close_matches(user_input, flat_titles, n=5, cutoff=0.5)
-        
+
         if matches:
             resolved_titles = []
             for match in matches:
@@ -76,76 +76,116 @@ def resolve_show_title(user_input):
                     resolved_titles.append(result[0])
             return resolved_titles
 
-    return [] # Target completely MIA
+    return []
 
-# --- TIER 2: LLM SQL EXECUTION ---
 
-def execute_lens_query(sql_string):
+def find_franchise_titles(reference_titles):
     """
-    Executes the LLM-generated SQL from the Targeting Lenses.
-    Returns a list of candidate english_titles.
+    Given a list of canonical english_titles, find all franchise variants
+    in the DB via substring matching. Returns a set of english_titles that
+    are variants of the reference shows (e.g., "Attack on Titan" matches
+    "Attack on Titan Season 2", "Attack on Titan: The Final Season", etc.).
+    Does NOT include the original reference titles themselves.
     """
-    try:
-        with _get_readonly_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql_string)
-            # Fetch the first column (which our prompt forces to be english_title)
-            return [row[0] for row in cursor.fetchall() if row[0]]
-    except sqlite3.OperationalError as e:
-        logger.error(f"SQL Execution Blocked (Potential Injection or Syntax Error): {e}")
-        return []
-    except Exception as e:
-        logger.error(f"Database Error: {e}")
-        return []
+    if not reference_titles:
+        return set()
 
-# --- TIER 3: SEMANTIC FUSION PACKAGING ---
+    variants = set()
+    with _get_readonly_connection() as conn:
+        cursor = conn.cursor()
+        for title in reference_titles:
+            # Use the longest meaningful prefix to catch franchise variants
+            # without false positives (e.g., "86" is too short for LIKE)
+            if len(title) < 4:
+                continue
+            # Search by english_title substring
+            cursor.execute(
+                "SELECT english_title FROM anime_info WHERE english_title LIKE ? AND english_title != ?",
+                (f"%{title}%", title),
+            )
+            variants.update(row[0] for row in cursor.fetchall())
+            # Also search by romaji_title to catch spelling variants
+            # (e.g., "Haikyu!!" vs "Haikyuu!!" in different DB entries)
+            cursor.execute(
+                "SELECT romaji_title FROM anime_info WHERE english_title = ?",
+                (title,),
+            )
+            romaji_row = cursor.fetchone()
+            if romaji_row and romaji_row[0] and len(romaji_row[0]) >= 4 and romaji_row[0] != title:
+                cursor.execute(
+                    "SELECT english_title FROM anime_info WHERE english_title LIKE ? AND english_title != ?",
+                    (f"%{romaji_row[0]}%", title),
+                )
+                variants.update(row[0] for row in cursor.fetchall())
+    return variants
+
+
+# --- BAYESIAN SCORE CONSTANTS ---
+# C = global mean MAL score across all 5,952 rated shows
+# m = prior weight (minimum votes before raw score is trusted)
+_BAYESIAN_GLOBAL_MEAN = 7.05
+_BAYESIAN_MIN_VOTES = 5000
+
+
+def _bayesian_score(raw_score, vote_count):
+    """
+    Bayesian-adjusted MAL score that shrinks low-vote shows toward the
+    global mean. Formula: (v/(v+m))*R + (m/(v+m))*C
+    """
+    if raw_score is None or vote_count is None:
+        return 0.0
+    v = vote_count
+    m = _BAYESIAN_MIN_VOTES
+    C = _BAYESIAN_GLOBAL_MEAN
+    return (v / (v + m)) * raw_score + (m / (v + m)) * C
+
+
+# --- SEMANTIC FUSION PACKAGING ---
+
 def fetch_fusion_profiles(candidate_titles):
     """
-    Takes the winning titles from the Lens Query and builds the rich, 
-    multi-variable intelligence packets needed for the final AI Reranker 
-    and Streamlit UI.
+    Takes candidate titles and builds the rich, multi-variable intelligence
+    packets needed for the AI Reranker and Streamlit UI.
     """
     if not candidate_titles:
         return []
 
     fusion_profiles = []
-    
+
     with _get_readonly_connection() as conn:
         cursor = conn.cursor()
-        
-        # Safe parameterized querying for a list of items
+
         placeholders = ','.join(['?'] * len(candidate_titles))
-        
-        # FIX: Removed controversy_score from the SELECT statement. We now have 8 columns.
+
         query = f"""
-                SELECT id, english_title, studio, mal_score, 
-                avg_sentiment, consensus_json, release_year, 
-                mal_synopsis 
-                FROM anime_info 
+                SELECT id, english_title, studio, mal_score, scored_by,
+                avg_sentiment, consensus_json, release_year,
+                mal_synopsis
+                FROM anime_info
                 WHERE english_title IN ({placeholders})
         """
-        
+
         cursor.execute(query, candidate_titles)
         rows = cursor.fetchall()
 
-        # FIX: Safely unpack exactly 8 variables
-        for mal_id, title, studio, score, sentiment, raw_json, release_year, synopsis in rows:
+        for mal_id, title, studio, score, voted, sentiment, raw_json, release_year, synopsis in rows:
             try:
                 consensus_data = json.loads(raw_json) if raw_json else {}
-                
-                # Assemble the Semantic Fusion Packet
+
                 profile = {
                     "id": mal_id,
                     "title": title,
                     "studio": studio,
-                    "quality_score": score,
+                    "quality_score": round(_bayesian_score(score, voted), 1),
+                    "raw_mal_score": score,
+                    "scored_by": voted,
                     "audience_sentiment": sentiment,
                     "release_year": release_year,
                     "synopsis": synopsis,
                     "audience_consensus": consensus_data.get("consensus_summary", ""),
                     "pros": consensus_data.get("pros", []),
                     "cons": consensus_data.get("cons", []),
-                    "controversy_score": consensus_data.get("controversy_score", 0) # <-- Extracted from JSON here!
+                    "controversy_score": consensus_data.get("controversy_score", 0)
                 }
                 fusion_profiles.append(profile)
             except json.JSONDecodeError:

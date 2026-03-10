@@ -7,7 +7,6 @@ FUNCTION: The central orchestrator. Routes natural language to the LLM (prompts.
 
 import os
 import sys
-import random
 import logging
 from google import genai
 from pydantic import BaseModel, Field
@@ -24,6 +23,7 @@ if ROOT_DIR not in sys.path:
 
 import analysis.prompts as prompts
 import analysis.queries as queries
+import analysis.vector_store as vector_store
 import analysis.telemetry_logger as telemetry
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ class RerankedShow(BaseModel):
 
 class TriangulationPlan(BaseModel):
     intersection_summary: str = Field(description="1-2 sentence analysis of the shared DNA.")
-    sql_query: str = Field(description="A valid SQLite SELECT statement returning 'english_title'.")
+    search_query: str = Field(description="A natural language search phrase capturing the shared thematic DNA, suitable for semantic vector search.")
 
 # --- THE ORCHESTRATOR ---
 
@@ -46,36 +46,6 @@ class RecommendationEngine:
     def __init__(self, api_key):
         self.client = genai.Client(api_key=api_key)
         self.model_id = "gemini-2.5-flash"
-        
-        # Map UI Dropdown selections to our Prompt Lenses
-        self.lenses = {
-            "Baseline": prompts.BASELINE_LENS,
-            "Deep Scan": prompts.DEEP_SCAN_LENS,
-            "Friction Filter": prompts.FRICTION_FILTER_LENS,
-            "Vanguard": prompts.VANGUARD_LENS,
-            # We reuse the baseline prompt for SQL translation, but bypass the AI reranker later
-            "Objective Rankings": prompts.BASELINE_LENS 
-        }
-
-    def _generate_sql(self, user_prompt, lens_name="Baseline"):
-        """Phase 1: Translates natural language into a targeted SQL query."""
-        system_instruction = self.lenses.get(lens_name, prompts.BASELINE_LENS)
-        prompt = system_instruction.format(user_prompt=user_prompt)
-        
-        try:
-            response = self.client.models.generate_content(
-                model=self.model_id, 
-                contents=prompt
-            )
-            raw_sql = response.text.strip().replace("```sql", "").replace("```", "").strip()
-            return raw_sql
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
-                logger.error("API Rate Limit Exceeded during SQL Generation.")
-                return "RATE_LIMIT_ERROR"
-            logger.error(f"LLM SQL Generation Error: {e}")
-            return None
 
     def _rerank_candidates(self, user_prompt, current_batch):
         """Phase 2: Evaluates a specific chunk of fusion profiles."""
@@ -85,6 +55,8 @@ class RecommendationEngine:
         candidates_block = ""
         for p in current_batch:
             candidates_block += f"Title: {p['title']}\n"
+            candidates_block += f"Semantic Match: {p.get('semantic_similarity', 0.0):.2f}\n"
+            candidates_block += f"Scored By: {p.get('scored_by', 0):,} users\n"
             candidates_block += f"Synopsis: {p['synopsis']}\n"
             candidates_block += f"Audience Consensus: {p['audience_consensus']}\n"
             candidates_block += f"Controversy Score: {p['controversy_score']}/10\n"
@@ -118,48 +90,96 @@ class RecommendationEngine:
             logger.error(f"LLM Reranking Error: {e}")
             return []
 
+    def _rerank_dna_candidates(self, intersection_summary, reference_titles, current_batch):
+        """Phase 2 for DNA Triangulation: scores candidates against thematic DNA, not a freeform query."""
+        if not current_batch:
+            return []
+
+        candidates_block = ""
+        for p in current_batch:
+            candidates_block += f"Title: {p['title']}\n"
+            candidates_block += f"Semantic Match: {p.get('semantic_similarity', 0.0):.2f}\n"
+            candidates_block += f"Scored By: {p.get('scored_by', 0):,} users\n"
+            candidates_block += f"Synopsis: {p['synopsis']}\n"
+            candidates_block += f"Audience Consensus: {p['audience_consensus']}\n"
+            candidates_block += f"Controversy Score: {p['controversy_score']}/10\n"
+            candidates_block += "-"*40 + "\n"
+
+        prompt = prompts.DNA_RERANKER_PROMPT.format(
+            reference_titles=", ".join(reference_titles),
+            intersection_summary=intersection_summary,
+            candidates_block=candidates_block,
+        )
+        prompt += f"\n\nEvaluate all {len(current_batch)} shows above. Assign a 'match_confidence' score (0-100) to each and return them in ranked order. If a show has no meaningful thematic connection, assign it a score below 30 — it will be filtered out downstream."
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_id,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_schema": list[RerankedShow]
+                }
+            )
+            return response.parsed if response.parsed else []
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
+                logger.error("API Rate Limit Exceeded during DNA Reranking.")
+                return ["RATE_LIMIT_ERROR"]
+            logger.error(f"DNA Reranking Error: {e}")
+            return []
+
     # =====================================================================
     # NEW STATEFUL ARCHITECTURE (AOT GLOBAL SCORING)
     # =====================================================================
 
-    def fetch_vault_pool(self, user_prompt, lens_name="Baseline"):
-        """STEP 1: Generates SQL, queries Vault, and PRE-SCORES all top candidates."""
-        sql_query = self._generate_sql(user_prompt, lens_name)
-        if sql_query == "RATE_LIMIT_ERROR":
-            return {"success": False, "error": "System cooling down. API rate limits are currently at maximum capacity. Please try again in 60 seconds."}
-        if not sql_query:
-            return {"success": False, "error": "Failed to generate search strategy."}
+    def fetch_vault_pool(self, user_prompt, lens_name="Intelligent Search"):
+        """STEP 1: Retrieves candidates via FAISS vector search or Objective Rankings, then PRE-SCORES."""
 
-        candidate_titles = queries.execute_lens_query(sql_query)
-        if not candidate_titles:
+        if lens_name == "Objective Rankings":
+            search_results = vector_store.objective_rankings_search(user_prompt, top_k=50)
+        else:
+            search_results = vector_store.search(user_prompt, top_k=50)
+
+        if not search_results:
             return {"success": False, "error": "No classified intelligence matched that specific combination of traits."}
+
+        # Build similarity lookup from search results
+        sim_lookup = {r["title"]: r["similarity"] for r in search_results}
+        candidate_titles = [r["title"] for r in search_results]
 
         fusion_profiles = queries.fetch_fusion_profiles(candidate_titles)
 
+        # Inject similarity scores into fusion profiles
+        for p in fusion_profiles:
+            p["semantic_similarity"] = sim_lookup.get(p["title"], 0.0)
+
         if lens_name == "Objective Rankings":
-            pool = sorted(fusion_profiles, key=lambda x: x.get('quality_score', 0.0), reverse=True)
-            # Create dummy pre-scored objects so the UI still works seamlessly
+            # Preserve the SQL ordering (already sorted by mal_score DESC)
+            title_order = {t: i for i, t in enumerate(candidate_titles)}
+            pool = sorted(fusion_profiles, key=lambda x: title_order.get(x['title'], 999))
             scored_pool = []
             for idx, p in enumerate(pool[:30]):
                 scored_pool.append({
                     "ai_reasoning": f"Objective Result #{idx + 1} from direct Vault query.",
-                    "match_confidence": 100, 
+                    "match_confidence": 100,
                     "controversy_warning": None,
                     "profile": p
                 })
         else:
-            # VIBE MODE: Take the top 15 from SQL and score them ALL at once
-            pool = fusion_profiles[:15] 
+            pool = fusion_profiles[:15]
             top_picks = self._rerank_candidates(user_prompt, pool)
-            
+
             if top_picks == ["RATE_LIMIT_ERROR"]:
                  return {"success": False, "error": "System cooling down. API rate limits are currently at maximum capacity. Please try again in 60 seconds."}
-            
-            # GLOBAL SORT: Rank all 15 shows by AI confidence before pagination
+
             top_picks = sorted(top_picks, key=lambda x: x.match_confidence, reverse=True)
-            
+
             scored_pool = []
             for pick in top_picks:
+                if pick.match_confidence < 50:
+                    continue
                 profile_data = next((p for p in pool if p['title'] == pick.title), None)
                 if profile_data:
                     scored_pool.append({
@@ -169,26 +189,25 @@ class RecommendationEngine:
                         "profile": profile_data
                     })
 
-            # LOGGING: Record the execution now that the global pool is built
             if scored_pool:
                 rec_titles = ", ".join([item['profile']['title'] for item in scored_pool[:5]])
                 telemetry.log_engine_execution(
-                    prompt=user_prompt, 
-                    lens=lens_name, 
-                    sql=sql_query, 
-                    candidate_count=len(pool), 
+                    prompt=user_prompt,
+                    lens=lens_name,
+                    sql="RAG:FAISS",
+                    candidate_count=len(pool),
                     success=True,
                     error_msg="",
                     recommendations=rec_titles
                 )
 
         return {
-            "success": True, 
-            "pool": scored_pool, # Returning a fully scored and sorted vault!
-            "sql_used": sql_query
+            "success": True,
+            "pool": scored_pool,
+            "sql_used": "RAG:FAISS"
         }
 
-    def process_next_chunk(self, user_prompt, chunk, lens_name="Baseline", sql_query=""):
+    def process_next_chunk(self, user_prompt, chunk, lens_name="Intelligent Search", sql_query=""):
         """
         STEP 2: The chunk is now ALREADY SCORED. Just return it to the UI instantly.
         """
@@ -202,7 +221,7 @@ class RecommendationEngine:
     # LEGACY WRAPPERS & TRIANGULATION
     # =====================================================================
 
-    def execute_standard_pipeline(self, user_prompt, lens_name="Baseline"):
+    def execute_standard_pipeline(self, user_prompt, lens_name="Intelligent Search"):
         """Legacy wrapper for CLI tests or single-shot runs."""
         pool_response = self.fetch_vault_pool(user_prompt, lens_name)
         if not pool_response["success"]:
@@ -261,18 +280,29 @@ class RecommendationEngine:
         except Exception as e:
             return {"success": False, "error": f"DNA Synthesis Failed: {e}"}
 
-        candidate_titles = queries.execute_lens_query(plan.sql_query)
-        candidate_titles = [t for t in candidate_titles if t not in resolved_titles]
+        # Vector centroid retrieval: use the reference shows' own FAISS
+        # vectors instead of embedding a lossy LLM-generated text query.
+        # Franchise exclusion is handled inside search_by_centroid().
+        search_results = vector_store.search_by_centroid(resolved_titles, top_k=50)
 
-        if not candidate_titles:
+        if not search_results:
             return {"success": False, "error": "No matching targets found for this specific DNA blend."}
 
-        fusion_profiles = queries.fetch_fusion_profiles(candidate_titles)
-        chunk = fusion_profiles[:5] 
-        top_picks = self._rerank_candidates(plan.intersection_summary, chunk)
+        sim_lookup = {r["title"]: r["similarity"] for r in search_results}
+        candidate_titles = [r["title"] for r in search_results]
 
+        fusion_profiles = queries.fetch_fusion_profiles(candidate_titles)
+        for p in fusion_profiles:
+            p["semantic_similarity"] = sim_lookup.get(p["title"], 0.0)
+        chunk = fusion_profiles[:15]
+        top_picks = self._rerank_dna_candidates(plan.intersection_summary, resolved_titles, chunk)
+
+        # Confidence floor: drop results below 40% to prevent embarrassing
+        # low-confidence recommendations from reaching the UI.
         final_results = []
         for pick in top_picks:
+            if pick.match_confidence < 40:
+                continue
             profile_data = next((p for p in chunk if p['title'] == pick.title), None)
             if profile_data:
                 final_results.append({
@@ -283,8 +313,8 @@ class RecommendationEngine:
                 })
 
         return {
-            "success": True, 
+            "success": True,
             "intersection_summary": plan.intersection_summary,
             "data": final_results,
-            "diagnostics": {"sql_used": plan.sql_query}
+            "diagnostics": {"sql_used": "RAG:FAISS"}
         }

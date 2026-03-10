@@ -46,3 +46,40 @@ class JikanClient:
         except Exception as e:
             logger.error(f"❌ Jikan Error for ID {mal_id}: {e}")
             return []
+
+    def get_anime_genres(self, mal_id, attempt=1, max_attempts=3):
+        """
+        Fetches genre, theme, and demographic tags for an anime from Jikan.
+        Returns a sorted, deduplicated list of tag names
+        (e.g., ["Action", "School", "Shounen", "Super Power"]).
+        """
+        endpoint = f"{self.base_url}/anime/{mal_id}"
+
+        try:
+            response = self.session.get(endpoint)
+
+            if response.status_code == 429:
+                if attempt > max_attempts:
+                    logger.error(f"❌ Jikan Rate Limit: Max retries exhausted for ID {mal_id}")
+                    return None
+                wait_time = 2 ** attempt
+                logger.warning(f"⚠️ Rate limited by Jikan. Cooling down for {wait_time}s (Attempt {attempt})...")
+                time.sleep(wait_time)
+                return self.get_anime_genres(mal_id, attempt + 1, max_attempts)
+
+            response.raise_for_status()
+            data = response.json().get("data", {})
+
+            tags = set()
+            for field in ("genres", "explicit_genres", "themes", "demographics"):
+                for entry in data.get(field, []):
+                    name = entry.get("name")
+                    if name:
+                        tags.add(name)
+
+            time.sleep(self.rate_limit_delay)
+            return sorted(tags)
+
+        except Exception as e:
+            logger.error(f"❌ Jikan Genre Error for ID {mal_id}: {e}")
+            return None

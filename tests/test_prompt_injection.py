@@ -16,8 +16,8 @@ else:
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-import analysis.prompts as prompts
-import analysis.queries as queries
+import analysis.prompts_deprecated as prompts
+import analysis.queries_deprecated as queries
 
 load_dotenv(os.path.join(ROOT_DIR, "env_variables.env"))
 client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))

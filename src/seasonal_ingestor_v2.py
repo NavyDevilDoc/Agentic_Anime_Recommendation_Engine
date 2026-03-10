@@ -84,202 +84,182 @@ class SeasonalIngestor:
         print(f"📡 Ingestor Initialized. Target Database: {self.db_path}")
 
 
-    async def ingest_single_anime(self, mal_id):
+    async def _process_show(self, node, year, season, conn=None):
         """
-        [ADDED] Capability: The Sniper Mode. 
-        Bypasses the season sweep and ingests/updates a single show directly by ID.
+        Core ingestion logic shared by both ingest_single_anime and ingest_season.
+        Handles: existence check, review fetch, sentiment calc, AI distillation, DB save.
+        Returns True if the show was successfully vaulted or already complete, False otherwise.
         """
-        print(f"\n🎯 DIRECT INGESTION MISSION: ID {mal_id}")
-        
-        # 1. Fetch exact metadata from MAL
-        url = f"https://api.myanimelist.net/v2/anime/{mal_id}"
-        params = {'fields': 'synopsis,genres,studios,mean,num_scoring_users,alternative_titles,media_type,start_season'}
-        
-        try:
-            response = requests.get(url, headers=self.mal.headers, params=params)
-            response.raise_for_status()
-            node = response.json() # For a single anime, the payload IS the node
-        except Exception as e:
-            print(f" ❌ MAL API FATAL ERROR FOR ID {mal_id}: {e}")
-            return
-            
+        mal_id = node['id']
         title = node.get('title', f"Unknown ID {mal_id}")
-        
-        # 2. Extract season/year dynamically
-        start_season = node.get('start_season', {})
-        year = start_season.get('year', 9999)
-        season = start_season.get('season', 'unknown')
         season_tag = f"{season.capitalize()}_{year}"
 
-        if self._show_exists(mal_id):
-            self._clear_casualty(mal_id)
-            # If called via vault_manager, consensus_json is usually NULLed first,
-            # so this check safely ignores fully complete shows but allows forced updates.
+        if self._show_exists(mal_id, conn=conn):
+            self._clear_casualty(mal_id, conn=conn)
             print(f" ⚠️ Show '{title}' already exists with full intelligence. Skipping.")
-            return
+            return True
 
-        # 3. Fetch Reviews
-        print(f" ⏳ Fetching Jikan reviews for {title}...")
+        # --- STEP 1: JIKAN REVIEWS ---
         reviews = self.jikan.get_anime_reviews(mal_id)
         if not reviews:
-            self._log_casualty(mal_id, title, season_tag, "JIKAN_API", "Returned 0 reviews. Cannot distill.")
-            return
+            self._log_casualty(mal_id, title, season_tag, "JIKAN_API", "Returned 0 reviews. Cannot distill.", conn=conn)
+            return False
 
-        # 4. Math & AI Distillation
+        # --- STEP 2: MATH ---
         avg_sentiment = self.sentiment_engine.calculate_jit_sentiment(reviews)
 
+        # --- STEP 3: AI DISTILLATION ---
         context = {
-            "title": title, 
-            "synopsis": node.get('synopsis', ''), 
+            "title": title,
+            "synopsis": node.get('synopsis', ''),
             "reviews": [r.get('content', '') for r in reviews[:15]]
         }
-        
+
         try:
-            print(f" 🧠 Distilling consensus for {title}...")
             await asyncio.sleep(2.0)
             consensus_json = await self.distiller.distill_sentiment(context)
-            
-            if not consensus_json:
-                self._log_casualty(mal_id, title, season_tag, "AI_DISTILLATION", "Gemini returned None. Possible safety filter or parsing failure.")
-                return
 
-            # 5. Save to Vault
-            self._save_to_db(node, consensus_json, avg_sentiment, year, season)
-            self._clear_casualty(mal_id)
-            print(f" ✅ MISSION ACCOMPLISHED: '{title}' vaulted.")
-            
+            if not consensus_json:
+                self._log_casualty(mal_id, title, season_tag, "AI_DISTILLATION", "Gemini returned None. Possible safety filter or parsing failure.", conn=conn)
+                return False
+
+            # --- STEP 4: DATABASE ---
+            self._save_to_db(node, consensus_json, avg_sentiment, year, season, conn=conn)
+            self._clear_casualty(mal_id, conn=conn)
+            return True
+
         except Exception as e:
             if "429" in str(e):
                 print(f"   ⏳ Quota hit for {title}. Cooling down...")
                 await asyncio.sleep(30)
+                self._log_casualty(mal_id, title, season_tag, "RATE_LIMIT", "Gemini 429 quota exceeded.", conn=conn)
             else:
                 print(f"   ❌ DISTILLATION ERROR for {title}: {e}")
-                self._log_casualty(mal_id, title, season_tag, "UNHANDLED_EXCEPTION", str(e))
+                self._log_casualty(mal_id, title, season_tag, "UNHANDLED_EXCEPTION", str(e), conn=conn)
+            return False
+
+    async def ingest_single_anime(self, mal_id):
+        """
+        Capability: The Sniper Mode.
+        Bypasses the season sweep and ingests/updates a single show directly by ID.
+        """
+        print(f"\n🎯 DIRECT INGESTION MISSION: ID {mal_id}")
+
+        # 1. Fetch exact metadata from MAL
+        url = f"https://api.myanimelist.net/v2/anime/{mal_id}"
+        params = {'fields': 'synopsis,genres,studios,mean,num_scoring_users,alternative_titles,media_type,start_season'}
+
+        try:
+            response = requests.get(url, headers=self.mal.headers, params=params)
+            response.raise_for_status()
+            node = response.json()
+        except Exception as e:
+            print(f" ❌ MAL API FATAL ERROR FOR ID {mal_id}: {e}")
+            return
+
+        title = node.get('title', f"Unknown ID {mal_id}")
+
+        # 2. Extract season/year dynamically
+        start_season = node.get('start_season', {})
+        year = start_season.get('year', 9999)
+        season = start_season.get('season', 'unknown')
+
+        # 3. Process through shared pipeline
+        print(f" ⏳ Processing {title}...")
+        success = await self._process_show(node, year, season)
+        if success:
+            print(f" ✅ MISSION ACCOMPLISHED: '{title}' vaulted.")
 
 
     async def ingest_season(self, year, season, target_ids=None):
         print(f"\n🚀 MISSION START: {season.upper()} {year}")
         if target_ids:
             print(f"🎯 TARGETED STRIKE: Focusing strictly on {len(target_ids)} missing/incomplete shows.")
-        
+
         url = f"https://api.myanimelist.net/v2/anime/season/{year}/{season}"
-        # ADDED 'media_type' to the fields parameter
         params = {'limit': 100, 'fields': 'synopsis,genres,studios,mean,num_scoring_users,alternative_titles,media_type'}
-        
+
         anime_list = []
-        
+
         try:
             while url:
                 response = requests.get(url, headers=self.mal.headers, params=params)
                 response.raise_for_status()
                 payload = response.json()
-                
-                # Extract the raw page data
+
                 page_data = payload.get('data', [])
-                
+
                 # THE MEDIA FILTER: Keep only standard TV broadcasts
                 tv_only_data = [entry for entry in page_data if entry['node'].get('media_type') == 'tv']
-                
+
                 anime_list.extend(tv_only_data)
-                
+
                 paging = payload.get('paging', {})
-                url = paging.get('next') 
-                params = None 
-                
+                url = paging.get('next')
+                params = None
+
             if target_ids is not None:
                 anime_list = [entry for entry in anime_list if entry['node']['id'] in target_ids]
-                
+
             print(f"✅ MAL API: Successfully extracted {len(anime_list)} TV titles for this season.")
-            
+
         except Exception as e:
             print(f"❌ MAL API FATAL ERROR: {e}")
             return
 
-        for entry in tqdm(anime_list, desc=f"Vaulting {season}", unit="show"):
-            node = entry['node']
-            mal_id = node['id']
-            title = node['title']
-            season_tag = f"{season.capitalize()}_{year}"
-            
-            if self._show_exists(mal_id):
-                # If it already has complete intelligence, clear any old casualties and skip
-                self._clear_casualty(mal_id)
-                continue
-
-            # --- DIAGNOSTIC STEP 1: JIKAN REVIEWS ---
-            reviews = self.jikan.get_anime_reviews(mal_id)
-            if not reviews:
-                # CASUALTY: No audience data found.
-                self._log_casualty(mal_id, title, season_tag, "JIKAN_API", "Returned 0 reviews. Cannot distill.")
-                continue
-
-            # --- DIAGNOSTIC STEP 2: MATH ---
-            avg_sentiment = self.sentiment_engine.calculate_jit_sentiment(reviews)
-
-            # --- DIAGNOSTIC STEP 3: AI ---
-            context = {
-                "title": title, 
-                "synopsis": node.get('synopsis', ''), 
-                "reviews": [r.get('content', '') for r in reviews[:15]] # Safe .get extraction
-            }
-            
-            try:
-                await asyncio.sleep(2.0)
-                consensus_json = await self.distiller.distill_sentiment(context)
-                
-                # CASUALTY: Gemini returned None (likely a Pydantic parse error or safety block)
-                if not consensus_json:
-                    self._log_casualty(mal_id, title, season_tag, "AI_DISTILLATION", "Gemini returned None. Possible safety filter or parsing failure.")
-                    continue
-
-                # --- DIAGNOSTIC STEP 4: DATABASE ---
-                self._save_to_db(node, consensus_json, avg_sentiment, year, season)
-                
-                # HEALED: Successfully vaulted. Clear from CASREP.
-                self._clear_casualty(mal_id)
-                
-            except Exception as e:
-                if "429" in str(e):
-                    print(f"   ⏳ Quota hit for {title}. Cooling down...")
-                    await asyncio.sleep(30)
-                else:
-                    print(f"   ❌ DISTILLATION ERROR for {title}: {e}")
-                    self._log_casualty(mal_id, title, season_tag, "UNHANDLED_EXCEPTION", str(e))
-                continue
-
-    def _show_exists(self, mal_id):
-        """Checks if a show is not just present, but has 'Complete Intelligence'."""
         with sqlite3.connect(self.db_path, timeout=20) as conn:
-            # We only skip if the show has BOTH a synopsis AND the AI consensus
-            query = "SELECT 1 FROM anime_info WHERE id = ? AND consensus_json IS NOT NULL AND mal_synopsis IS NOT NULL"
-            return conn.execute(query, (mal_id,)).fetchone() is not None
+            for entry in tqdm(anime_list, desc=f"Vaulting {season}", unit="show"):
+                node = entry['node']
+                await self._process_show(node, year, season, conn=conn)
 
-    def _save_to_db(self, node, consensus_json, avg_sentiment, year, season):
+    def _show_exists(self, mal_id, conn=None):
+        """Checks if a show is not just present, but has 'Complete Intelligence'."""
+        def _query(c):
+            query = "SELECT 1 FROM anime_info WHERE id = ? AND consensus_json IS NOT NULL AND mal_synopsis IS NOT NULL"
+            return c.execute(query, (mal_id,)).fetchone() is not None
+
+        if conn:
+            return _query(conn)
+        with sqlite3.connect(self.db_path, timeout=20) as c:
+            return _query(c)
+
+    def _save_to_db(self, node, consensus_json, avg_sentiment, year, season, conn=None):
         try:
-            with sqlite3.connect(self.db_path, timeout=20) as conn:
+            def _execute(c):
                 studio = node.get('studios', [{}])[0].get('name', 'Unknown') if node.get('studios') else "Unknown"
                 eng_title = node.get('alternative_titles', {}).get('en') or node['title']
 
-                cursor = conn.cursor()
-                # UPSERT LOGIC: Insert new, or update specific columns if the ID exists
+                cursor = c.cursor()
+                # UPSERT LOGIC: Insert new, or update ALL mutable columns if the ID exists
                 cursor.execute("""
                     INSERT INTO anime_info (
-                        id, romaji_title, english_title, mal_score, 
-                        season, scored_by, studio, avg_sentiment, 
+                        id, romaji_title, english_title, mal_score,
+                        season, scored_by, studio, avg_sentiment,
                         consensus_json, mal_synopsis, release_year
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
+                        romaji_title=excluded.romaji_title,
+                        english_title=excluded.english_title,
+                        mal_score=excluded.mal_score,
+                        scored_by=excluded.scored_by,
+                        studio=excluded.studio,
                         avg_sentiment=excluded.avg_sentiment,
                         consensus_json=excluded.consensus_json,
                         mal_synopsis=excluded.mal_synopsis;
                 """, (
-                    node['id'], node['title'], eng_title, node.get('mean'), 
-                    f"{season.capitalize()}_{year}", node.get('num_scoring_users'), 
-                    studio, avg_sentiment, json.dumps(consensus_json), 
+                    node['id'], node['title'], eng_title, node.get('mean'),
+                    f"{season.capitalize()}_{year}", node.get('num_scoring_users'),
+                    studio, avg_sentiment, json.dumps(consensus_json),
                     node.get('synopsis', ''), year
                 ))
-                conn.commit()
+                c.commit()
                 print(f"  💾 UPSERT SUCCESS: '{eng_title}' secured in Vault.")
+
+            if conn:
+                _execute(conn)
+            else:
+                with sqlite3.connect(self.db_path, timeout=20) as c:
+                    _execute(c)
         except Exception as e:
             print(f"  ❌ DATABASE WRITE ERROR for {node['title']}: {e}")
 
@@ -297,25 +277,37 @@ class SeasonalIngestor:
                 )
             """)
 
-    def _log_casualty(self, mal_id, title, season, node, error_msg):
+    def _log_casualty(self, mal_id, title, season, node, error_msg, conn=None):
         """Logs a failure to the CASREP table."""
+        def _execute(c):
+            c.execute("""
+                INSERT INTO intelligence_quarantine (mal_id, title, season, failure_node, error_message, last_attempt)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(mal_id) DO UPDATE SET
+                    failure_node=excluded.failure_node,
+                    error_message=excluded.error_message,
+                    last_attempt=CURRENT_TIMESTAMP;
+            """, (mal_id, title, season, node, str(error_msg)))
+
         try:
-            with sqlite3.connect(self.db_path, timeout=20) as conn:
-                conn.execute("""
-                    INSERT INTO intelligence_quarantine (mal_id, title, season, failure_node, error_message, last_attempt)
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(mal_id) DO UPDATE SET
-                        failure_node=excluded.failure_node,
-                        error_message=excluded.error_message,
-                        last_attempt=CURRENT_TIMESTAMP;
-                """, (mal_id, title, season, node, str(error_msg)))
+            if conn:
+                _execute(conn)
+            else:
+                with sqlite3.connect(self.db_path, timeout=20) as c:
+                    _execute(c)
         except Exception as e:
             print(f"  ❌ CASREP LOGGING FAILED for {title}: {e}")
 
-    def _clear_casualty(self, mal_id):
+    def _clear_casualty(self, mal_id, conn=None):
         """Removes a show from quarantine if it successfully heals."""
+        def _execute(c):
+            c.execute("DELETE FROM intelligence_quarantine WHERE mal_id = ?", (mal_id,))
+
         try:
-            with sqlite3.connect(self.db_path, timeout=20) as conn:
-                conn.execute("DELETE FROM intelligence_quarantine WHERE mal_id = ?", (mal_id,))
+            if conn:
+                _execute(conn)
+            else:
+                with sqlite3.connect(self.db_path, timeout=20) as c:
+                    _execute(c)
         except Exception:
             pass
