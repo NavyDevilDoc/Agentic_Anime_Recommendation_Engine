@@ -1,0 +1,28 @@
+# Security: never copy secrets into the Docker image
+env_variables.env
+.env
+token_data.json
+
+# Development/local files
+Archive/
+Claude_Checkpoint_Document.txt
+CLAUDE.md
+MIGRATION_PLAN.md
+PROGRESS.md
+CRITICAL_PATH.md
+Streamlit_Output.md
+.git/
+.gitignore
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Tools and scripts not needed at runtime
+tools/
+tests/
+
+# Virtual environments
+venv/
+env/

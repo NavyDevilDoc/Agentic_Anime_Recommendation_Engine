@@ -11,8 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code
 COPY . .
 
-# Hugging Face Spaces requires applications to run on port 7860
-EXPOSE 7860
+# Railway assigns $PORT dynamically; Streamlit reads it at runtime
+EXPOSE ${PORT:-8501}
 
-# Command to launch the Streamlit app on the correct port and host
-CMD ["streamlit", "run", "app.py", "--server.port=7860", "--server.address=0.0.0.0"]
+# Launch Streamlit using Railway's PORT, falling back to 8501 for local dev
+CMD streamlit run app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true
