@@ -7,6 +7,7 @@ import streamlit as st
 import os
 import sys
 import sqlite3
+import html
 import pandas as pd
 from dotenv import load_dotenv
 
@@ -102,7 +103,7 @@ with tab_search:
     
     col1, col2 = st.columns([3, 1])
     with col1:
-        user_query = st.text_input("Search Directive:", placeholder="e.g., 'gritty military drama with mecha' or 'Top 5 Winter 2023 shows'")
+        user_query = st.text_input("Search Directive:", placeholder="e.g., 'gritty military drama with mecha' or 'Top 5 Winter 2023 shows'", max_chars=500)
     with col2:
         lens_choice = st.selectbox("Discovery Mode:", list(lens_info.keys()))
         st.caption(f"*{lens_info[lens_choice]}*")
@@ -146,7 +147,7 @@ with tab_search:
                 st.markdown(f"### {profile['title']} ({profile.get('release_year', 'Unknown')})")
                 col_a, col_b, col_c = st.columns(3)
                 col_a.write(f"**Studio:** {profile['studio']}")
-                col_b.write(f"**Quality:** <span class='score-badge'>{profile['quality_score']}</span>", unsafe_allow_html=True)
+                col_b.write(f"**Quality:** <span class='score-badge'>{html.escape(str(profile['quality_score']))}</span>", unsafe_allow_html=True)
                 
                 # Only show match confidence for Vibe Searches
                 if st.session_state.last_lens != "Objective Rankings":
@@ -157,7 +158,7 @@ with tab_search:
                 st.info(f"**AI Reasoning:** {item['ai_reasoning']}")
                 
                 if item.get("controversy_warning"):
-                    st.markdown(f'<div class="friction-box"><b>⚠️ Friction Alert:</b> {item["controversy_warning"]}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="friction-box"><b>⚠️ Friction Alert:</b> {html.escape(item["controversy_warning"])}</div>', unsafe_allow_html=True)
                 
                 st.link_button("🌐 View on MyAnimeList", f"https://myanimelist.net/anime/{profile.get('id', '')}")
 
@@ -214,9 +215,9 @@ with tab_triangulate:
     
     with st.form("triangulation_form"):
         t1, t2, t3 = st.columns(3)
-        ref_a = t1.text_input("Target 1 (Required)", placeholder="e.g., '86'")
-        ref_b = t2.text_input("Target 2 (Optional)")
-        ref_c = t3.text_input("Target 3 (Optional)")
+        ref_a = t1.text_input("Target 1 (Required)", placeholder="e.g., '86'", max_chars=100)
+        ref_b = t2.text_input("Target 2 (Optional)", max_chars=100)
+        ref_c = t3.text_input("Target 3 (Optional)", max_chars=100)
         
         tri_submitted = st.form_submit_button("Synthesize DNA", type="primary", use_container_width=True)
 
@@ -256,7 +257,7 @@ with tab_triangulate:
                 st.error(f"**Lookup Failed:** {result.get('error')}")
             # ... (the rest of your rendering logic stays exactly the same)
             else:
-                st.markdown(f'<div class="dna-box"><b>🧬 DNA Synthesis Complete:</b><br>{result["intersection_summary"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="dna-box"><b>🧬 DNA Synthesis Complete:</b><br>{html.escape(result["intersection_summary"])}</div>', unsafe_allow_html=True)
                 
                 for item in result["data"]:
                     profile = item["profile"]
@@ -275,7 +276,7 @@ with tab_archive:
     st.subheader("Anime Encyclopedia")
     st.write("Access the complete encyclopedia entry for a specific show. Resists typos and partial names.")
     
-    search_target = st.text_input("Show Title:", placeholder="e.g., 'Evangelion' or 'Code Geas'")
+    search_target = st.text_input("Show Title:", placeholder="e.g., 'Evangelion' or 'Code Geas'", max_chars=100)
     
     if search_target:
         matches = queries.resolve_show_title(search_target)

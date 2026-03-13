@@ -8,7 +8,7 @@ from google import genai
 from dotenv import load_dotenv
 
 SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
-if os.path.basename(SCRIPT_DIR) in ['tools', 'analysis', 'src']:
+if os.path.basename(SCRIPT_DIR) in ['tools', 'analysis', 'src', 'tests']:
     ROOT_DIR = os.path.dirname(SCRIPT_DIR)
 else:
     ROOT_DIR = SCRIPT_DIR
