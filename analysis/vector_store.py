@@ -1,7 +1,7 @@
 """
 MODULE: analysis/vector_store.py
 FUNCTION: FAISS-based semantic retrieval layer for the Recommendation Engine.
-          Replaces LLM-generated SQL (Phase 1) with dense vector search using BGE-M3.
+          Uses Google gemini-embedding-001 for dense vector search via FAISS.
           Phase 2 (Gemini reranking) remains unchanged.
 """
 
@@ -11,10 +11,11 @@ import re
 import json
 import sqlite3
 import logging
+import time
 import numpy as np
 import faiss
-import torch
-from transformers import AutoTokenizer, AutoModel
+from google import genai
+from dotenv import load_dotenv
 
 # --- BULLETPROOF PATH ANCHORING ---
 SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -31,62 +32,53 @@ logger = logging.getLogger(__name__)
 DB_PATH = os.path.join(ROOT_DIR, "data", "anime_intelligence_v2.db")
 INDEX_PATH = os.path.join(ROOT_DIR, "data", "anime_vector_index.faiss")
 METADATA_PATH = os.path.join(ROOT_DIR, "data", "anime_vector_metadata.json")
-MODEL_NAME = "BAAI/bge-m3"
+EMBEDDING_MODEL = "gemini-embedding-001"
 
 # Module-level singletons (populated on first call)
-_tokenizer = None
-_model = None
+_client = None
 _index = None
 _metadata = None
 
 
-def _get_device():
-    """Select GPU if available, otherwise CPU."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
+def _get_client():
+    """Lazy-load the Google GenAI client (singleton)."""
+    global _client
+    if _client is None:
+        load_dotenv(os.path.join(ROOT_DIR, "env_variables.env"))
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("GOOGLE_API_KEY not found in environment.")
+        _client = genai.Client(api_key=api_key)
+        logger.info("Google GenAI client initialized for embeddings.")
+    return _client
 
 
-def _get_model():
-    """Lazy-load the BGE-M3 tokenizer and model (singletons). Uses GPU when available."""
-    global _tokenizer, _model
-    if _model is None:
-        device = _get_device()
-        logger.info(f"Loading BGE-M3 embedding model on {device}...")
-        _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        _model = AutoModel.from_pretrained(MODEL_NAME)
-        _model.to(device)
-        _model.eval()
-        logger.info(f"BGE-M3 model loaded on {device}.")
-    return _tokenizer, _model
-
-
-def _embed(texts, batch_size=8, max_length=1024):
+def _embed(texts, task_type="RETRIEVAL_QUERY", batch_size=50):
     """
-    Encode a list of texts into dense embeddings using BGE-M3.
+    Encode a list of texts into dense embeddings using Google's gemini-embedding-001.
     Returns an (N, dim) numpy float32 array, L2-normalized.
+
+    task_type: "RETRIEVAL_DOCUMENT" for index building (documents to be searched),
+               "RETRIEVAL_QUERY" for search-time queries (default).
     """
-    tokenizer, model = _get_model()
-    device = next(model.parameters()).device
+    client = _get_client()
     all_embeddings = []
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
-        encoded = tokenizer(
-            batch,
-            max_length=max_length,
-            padding=True,
-            truncation=True,
-            return_tensors="pt",
+        result = client.models.embed_content(
+            model=EMBEDDING_MODEL,
+            contents=batch,
+            config={"task_type": task_type},
         )
-        encoded = {k: v.to(device) for k, v in encoded.items()}
-        with torch.no_grad():
-            outputs = model(**encoded)
-        # CLS token pooling (standard for BGE models)
-        embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
-        all_embeddings.append(embeddings)
+        for emb in result.embeddings:
+            all_embeddings.append(emb.values)
 
-    result = np.concatenate(all_embeddings, axis=0).astype(np.float32)
+        # Rate-limit courtesy: small delay between batches during bulk operations
+        if len(texts) > batch_size and i + batch_size < len(texts):
+            time.sleep(0.5)
+
+    result = np.array(all_embeddings, dtype=np.float32)
     faiss.normalize_L2(result)
     return result
 
@@ -212,8 +204,8 @@ def build_index():
     if not documents:
         raise ValueError("No embeddable documents found in the database.")
 
-    logger.info(f"Embedding {len(documents)} anime documents...")
-    embeddings = _embed(documents)
+    logger.info(f"Embedding {len(documents)} anime documents via Google API...")
+    embeddings = _embed(documents, task_type="RETRIEVAL_DOCUMENT")
 
     dim = embeddings.shape[1]
     index = faiss.IndexFlatIP(dim)
@@ -290,7 +282,7 @@ def update_index(mal_ids):
         return 0
 
     # Embed and append
-    embeddings = _embed(documents)
+    embeddings = _embed(documents, task_type="RETRIEVAL_DOCUMENT")
     index.add(embeddings)
     metadata.extend(new_metadata)
 

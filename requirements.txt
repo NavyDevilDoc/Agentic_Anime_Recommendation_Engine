@@ -1,6 +1,3 @@
-playwright
-playwright-stealth
-pytest-playwright
 vaderSentiment
 textblob
 pandas
@@ -13,5 +10,3 @@ google-genai
 sqlalchemy
 psycopg2-binary
 faiss-cpu
-transformers
-torch
