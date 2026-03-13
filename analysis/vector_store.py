@@ -943,7 +943,7 @@ def _composite_rerank(candidates):
     return [{"title": r["title"], "similarity": r["similarity"]} for r in reranked]
 
 
-def search(query, top_k=50):
+def search(query, top_k=50, year_min=None, year_max=None):
     """
     Embeds the user query, retrieves a large candidate pool from FAISS,
     applies metadata-aware composite reranking (blending semantic similarity
@@ -951,12 +951,28 @@ def search(query, top_k=50):
     {title, similarity} dicts.
 
     If the query contains structured constraints (temporal or genre filters),
-    routes through the hybrid SQL+FAISS filtered path first. Falls back to
-    the standard unfiltered FAISS path if no filters are detected or if the
-    filtered search yields no results.
+    or if UI-level era bounds are provided, routes through the hybrid
+    SQL+FAISS filtered path first. Falls back to the standard unfiltered
+    FAISS path if no filters are detected or if the filtered search yields
+    no results.
     """
     # --- FILTERED PATH (COA 2) ---
     filters = _extract_filters(query)
+
+    # Merge UI-level era bounds (radio buttons) into parsed filters.
+    # If the query already contains ANY temporal constraint (year, year_min,
+    # year_max, or season), the query's intent takes full precedence and UI
+    # era bounds are ignored to avoid contradictory filters.
+    query_has_temporal = any([filters["year"], filters["year_min"],
+                             filters["year_max"], filters["season"]])
+    if not query_has_temporal:
+        if year_min is not None:
+            filters["year_min"] = year_min
+            filters["has_filters"] = True
+        if year_max is not None:
+            filters["year_max"] = year_max
+            filters["has_filters"] = True
+
     if filters["has_filters"]:
         filtered_results = _filtered_vector_search(query, filters, top_k=300)
         if filtered_results is not None:

@@ -134,13 +134,13 @@ class RecommendationEngine:
     # NEW STATEFUL ARCHITECTURE (AOT GLOBAL SCORING)
     # =====================================================================
 
-    def fetch_vault_pool(self, user_prompt, lens_name="Intelligent Search"):
+    def fetch_vault_pool(self, user_prompt, lens_name="Intelligent Search", year_min=None, year_max=None):
         """STEP 1: Retrieves candidates via FAISS vector search or Objective Rankings, then PRE-SCORES."""
 
         if lens_name == "Objective Rankings":
             search_results = vector_store.objective_rankings_search(user_prompt, top_k=50)
         else:
-            search_results = vector_store.search(user_prompt, top_k=50)
+            search_results = vector_store.search(user_prompt, top_k=50, year_min=year_min, year_max=year_max)
 
         if not search_results:
             return {"success": False, "error": "No classified intelligence matched that specific combination of traits."}
