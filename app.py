@@ -53,9 +53,9 @@ def get_engine():
 engine = get_engine()
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def cached_fetch_pool(query, lens):
+def cached_fetch_pool(query, lens, year_min=None, year_max=None):
     """Caches the FAISS vector retrieval and reranking for 1 hour."""
-    return engine.fetch_vault_pool(query, lens)
+    return engine.fetch_vault_pool(query, lens, year_min=year_min, year_max=year_max)
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -107,7 +107,16 @@ with tab_search:
     with col2:
         lens_choice = st.selectbox("Discovery Mode:", list(lens_info.keys()))
         st.caption(f"*{lens_info[lens_choice]}*")
-    
+
+    era_options = {
+        "All Eras": (None, None),
+        "Classic (2000–2009)": (2000, 2009),
+        "Modern (2010–2019)": (2010, 2019),
+        "Recent (2020+)": (2020, None),
+    }
+    era_choice = st.radio("Era:", list(era_options.keys()), horizontal=True)
+    era_year_min, era_year_max = era_options[era_choice]
+
     submitted = st.button("Execute Search", type="primary", use_container_width=True)
 
     # 1. NEW SEARCH EXECUTION
@@ -116,7 +125,7 @@ with tab_search:
             engine_lens_name = backend_lens_map[lens_choice]
             
             # Fetch the pool of up to 30 shows
-            pool_response = cached_fetch_pool(user_query, engine_lens_name)
+            pool_response = cached_fetch_pool(user_query, engine_lens_name, year_min=era_year_min, year_max=era_year_max)
             
             if not pool_response.get("success"):
                 st.error(f"**Mission Failed:** {pool_response.get('error')}")
